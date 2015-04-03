@@ -29,8 +29,8 @@ class CaseInsensitiveMap(map: Map[String, String]) extends Map[String, String]
 }
 
 class MemSQLDataFrame(val df: DataFrame) {
-  def saveToMemSQL(url: String, table: String): Unit = {
-    MemSQLWriteDetails.saveTable(df, url, table)
+  def saveToMemSQL(url: String, table: String, scratchDir: String): Unit = {
+    MemSQLWriteDetails.saveTable(df, url, table, scratchDir)
   }
 }
 
@@ -49,9 +49,9 @@ class DefaultSource extends RelationProvider {
     val user = parameters.getOrElse("user", sys.error("Option 'user' not specified"))
     val password = parameters.getOrElse("password", "")
     val dbName = parameters.getOrElse("dbName", sys.error("Option 'dbName' not specified"))
-    dbtable = parameters.getOrElse("dbtable", sys.error("Option 'dbtable' not specified"))
+    val dbtable = parameters.getOrElse("dbtable", sys.error("Option 'dbtable' not specified"))
 
-    url = s"jdbc:mysql://$host:$port/$dbName?user=$user"
+    var url = s"jdbc:mysql://$host:$port/$dbName?user=$user"
     if (password != "") {
       url += s"&password=$password"
     }
@@ -74,18 +74,19 @@ class DefaultSource extends RelationProvider {
     (new JDBCSource).createRelation(sqlContext, newParams)
   }
 
-  var url: String = null
-  var dbtable: String = null
-
   def getNumPartitions(conn: Connection, database: String): Integer = {
     val q = s"SHOW PARTITIONS ON $database"
     var stmt = conn.createStatement
     val rs = stmt.executeQuery(q)
     var ret = -1
-    while (rs.next()) {
-      ret = (if (ret > rs.getInt("ordinal")) ret else rs.getInt("ordinal"))
+    try {
+      while (rs.next()) {
+        ret = (if (ret > rs.getInt("ordinal")) ret else rs.getInt("ordinal"))
+      }
     }
-    stmt.close()
+    finally {
+      stmt.close()
+    }
     ret
   }
 
@@ -159,8 +160,8 @@ object MemSQLRelationUsageDemo {
 
     // We can save these dataframes to MemSQL.
     val url = s"jdbc:mysql://$host:$port/$dbName?user=$user"
-    source_users_df.saveToMemSQL(url, "users")
-    source_groups_df.select("group_id", "group_name").saveToMemSQL(url, "groups")
+    source_users_df.saveToMemSQL(url, "users", "/tmp")
+    source_groups_df.select("group_id", "group_name").saveToMemSQL(url, "groups", "/tmp")
 
     // Now we can retrieve values from the MemSQL tables.
     val users_df = sqlContext.load("com.memsql.spark", Map(
@@ -183,7 +184,7 @@ object MemSQLRelationUsageDemo {
     val join_df = users_df.join(groups_df, users_df("user_id") === groups_df("group_id")).filter(groups_df("group_id") > 12)
       .select(users_df("user_id"), groups_df("group_id"))
 
-    join_df.saveToMemSQL(url, "users_groups")
+    join_df.saveToMemSQL(url, "users_groups", "/tmp")
 
     val users_groups_df = sqlContext.load("com.memsql.spark", Map(
       "host" -> host,

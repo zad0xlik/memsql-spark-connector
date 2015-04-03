@@ -44,64 +44,77 @@ package object spark {
       // We could also just not run this check - in that case we'll
       // just bubble up an exception from MemSQL
       val stmt = conn.createStatement
-      val rs = stmt.executeQuery(s"""
+      try {
+        val rs = stmt.executeQuery(s"""
         SELECT column_name
         FROM information_schema.columns
         WHERE table_name = '$table'
           AND extra LIKE '%computed%'
         """)
-      var computed_columns = Set(): Set[String]
-      while (rs.next()) {
-        computed_columns += rs.getString("column_name")
-      }
-      for (field <- rddSchema.fields) {
-        if (computed_columns contains field.name) {
-          throw new IllegalArgumentException(s"Cannot insert into computed column '${field.name}'")
+        var computed_columns = Set(): Set[String]
+        while (rs.next()) {
+          computed_columns += rs.getString("column_name")
         }
-      }
+        for (field <- rddSchema.fields) {
+          if (computed_columns contains field.name) {
+            throw new IllegalArgumentException(s"Cannot insert into computed column '${field.name}'")
+          }
+        }
 
-      var addComma = false
-      for (field <- rddSchema.fields) {
-        if (addComma) {
-          sql.append(", ")
+        var addComma = false
+        for (field <- rddSchema.fields) {
+          if (addComma) {
+            sql.append(", ")
+          }
+          sql.append(field.name)
+          addComma = true
         }
-        sql.append(field.name)
-        addComma = true
+        sql.append(")")
+        sql.toString
       }
-      sql.append(")")
-      sql.toString
+      finally {
+        stmt.close()
+      }
     }
 
     def savePartitionWithLoadData(
         url: String, table: String, iterator: Iterator[Row],
-        rddSchema: StructType, nullTypes: Array[Int]): Unit = {
+        rddSchema: StructType, nullTypes: Array[Int], scratchDir: String): Unit = {
       val conn = DriverManager.getConnection(url)
-      var committed = false
-      val tempFile = new File(s"/tmp/foo${nextInt}")
+      val tempFile = new File(s"${scratchDir}/memsql-relation-load-${nextInt}")
       try {
-        conn.setAutoCommit(false)
-        val q = loadDataQuery(conn, table, rddSchema, tempFile)
-        val stmt = conn.createStatement
-
         val writer = CSVWriter.open(tempFile)
-        while (iterator.hasNext) {
-          val row = iterator.next()
-          writer.writeRow(row.toSeq)
+        try {
+          while (iterator.hasNext) {
+            val row = iterator.next()
+            writer.writeRow(row.toSeq)
+          }
         }
-        writer.close()
-        stmt.executeQuery(q)
-        stmt.close()
+        finally {
+          writer.close()
+        }
+
+        val q = loadDataQuery(conn, table, rddSchema, tempFile)
+        conn.setAutoCommit(false)
+        val stmt = conn.createStatement
+        try {
+          stmt.executeQuery(q)
+        }
+        finally {
+          stmt.close()
+        }
         conn.commit()
       }
       finally {
         tempFile.delete()
+        conn.close()
       }
     }
 
     /**
      * Saves the RDD to the database in a single transaction.
      */
-    def saveTable(df: DataFrame, url: String, table: String) {
+    def saveTable(df: DataFrame, url: String, table: String, scratchDir: String) {
       val quirks = DriverQuirks.get(url)
       var nullTypes: Array[Int] = df.schema.fields.map(field => {
         var nullType: Option[Int] = quirks.getJDBCType(field.dataType)._2
@@ -127,7 +140,7 @@ package object spark {
 
       val rddSchema = df.schema
       df.foreachPartition { iterator =>
-        MemSQLWriteDetails.savePartitionWithLoadData(url, table, iterator, rddSchema, nullTypes)
+        MemSQLWriteDetails.savePartitionWithLoadData(url, table, iterator, rddSchema, nullTypes, scratchDir)
       }
     }
   }
