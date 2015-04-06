@@ -38,7 +38,7 @@ package object spark {
   object MemSQLWriteDetails extends Logging {
     def loadDataQuery(conn: Connection, table: String, rddSchema: StructType, tempFile: File):
         String = {
-      val sql = new StringBuilder(s"LOAD DATA INFILE '$tempFile' INTO TABLE $table (")
+      val sql = new StringBuilder(s"LOAD DATA LOCAL INFILE '$tempFile' INTO TABLE $table (")
 
       // We need to not insert into computed columns
       // We could also just not run this check - in that case we'll
